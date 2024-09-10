@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 use alloy::{
     network::Network,
-    primitives::{Address, I256, U256},
+    primitives::{Address, Bytes, I256, U256},
     providers::Provider,
     sol,
-    sol_types::{SolEvent, SolType},
+    sol_types::{SolCall, SolEvent, SolType},
     transports::Transport
 };
 use amms::{
@@ -14,7 +14,7 @@ use amms::{
         uniswap_v3::{IUniswapV3Pool, Info, UniswapV3Pool},
         AutomatedMarketMaker
     },
-    errors::{AMMError, EventLogError}
+    errors::AMMError
 };
 use reth_primitives::Log;
 use thiserror::Error;
@@ -22,8 +22,6 @@ use uniswap_v3_math::{
     error::UniswapV3MathError,
     tick_math::{MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO, MIN_TICK}
 };
-
-use crate::cfmm::uniswap::pool_manager::PoolManagerError;
 
 sol! {
     #[allow(missing_docs)]
@@ -129,17 +127,43 @@ impl EnhancedUniswapV3Pool {
         Ok((tick_data, result.blockNumber))
     }
 
+    pub fn exchange_price(&self, quoted_asset: Option<Address>) -> Result<f64, PoolError> {
+        let tick = uniswap_v3_math::tick_math::get_tick_at_sqrt_ratio(self.sqrt_price)?;
+        let shift = self.token_a_decimals as i8 - self.token_b_decimals as i8;
+
+        let price = match shift.cmp(&0) {
+            Ordering::Less => 1.0001_f64.powi(tick) / 10_f64.powi(-shift as i32),
+            Ordering::Greater => 1.0001_f64.powi(tick) * 10_f64.powi(shift as i32),
+            Ordering::Equal => 1.0001_f64.powi(tick)
+        };
+
+        if quoted_asset.is_none() || quoted_asset.unwrap() == self.token_b {
+            Ok(1.0 / price)
+        } else {
+            Ok(price)
+        }
+    }
+
+    pub fn exchange_quantity(&self, asset: Option<Address>) -> Result<u128, PoolError> {
+        let (reserve_a, reserve_b) = self.calculate_virtual_reserves()?;
+        match asset {
+            Some(asset) if asset == self.token_a => Ok(reserve_a),
+            Some(asset) if asset == self.token_b => Ok(reserve_b),
+            _ => Ok(reserve_a)
+        }
+    }
+
     pub async fn initialize<T, N, P>(
         &mut self,
         block_number: Option<u64>,
         provider: Arc<P>
-    ) -> Result<(), AMMError>
+    ) -> Result<(), PoolError>
     where
         T: Transport + Clone,
         N: Network,
         P: Provider<T, N>
     {
-        self.populate_data(block_number, provider).await
+        Ok(self.populate_data(block_number, provider).await?)
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -150,14 +174,14 @@ impl EnhancedUniswapV3Pool {
         &mut self,
         block_number: Option<u64>,
         provider: Arc<P>
-    ) -> Result<(), AMMError>
+    ) -> Result<(), PoolError>
     where
         T: Transport + Clone,
         N: Network,
         P: Provider<T, N>
     {
         if !self.is_initialized() {
-            return Err(AMMError::PoolDataError);
+            return Err(PoolError::PoolDataError);
         }
 
         self.ticks.clear();
@@ -236,9 +260,9 @@ impl EnhancedUniswapV3Pool {
         token_in: Address,
         amount_specified: I256,
         sqrt_price_limit_x96: Option<U256>
-    ) -> Result<SwapResult, SwapSimulationError> {
+    ) -> Result<SwapResult, PoolError> {
         if amount_specified.is_zero() {
-            return Err(SwapSimulationError::ZeroAmountSpecified);
+            return Err(PoolError::ZeroAmountSpecified);
         }
 
         let zero_for_one = token_in == self.token_a;
@@ -256,7 +280,7 @@ impl EnhancedUniswapV3Pool {
                 && (sqrt_price_limit_x96 <= self.sqrt_price
                     || sqrt_price_limit_x96 >= MAX_SQRT_RATIO))
         {
-            return Err(SwapSimulationError::InvalidSqrtPriceLimit);
+            return Err(PoolError::InvalidSqrtPriceLimit);
         }
 
         let mut amount_specified_remaining = amount_specified;
@@ -339,7 +363,7 @@ impl EnhancedUniswapV3Pool {
                     liquidity = if liquidity_net < 0 {
                         liquidity
                             .checked_sub((-liquidity_net) as u128)
-                            .ok_or(SwapSimulationError::LiquidityUnderflow)?
+                            .ok_or(PoolError::LiquidityUnderflow)?
                     } else {
                         liquidity + (liquidity_net as u128)
                     };
@@ -383,7 +407,7 @@ impl EnhancedUniswapV3Pool {
         token_in: Address,
         amount_specified: I256,
         sqrt_price_limit_x96: Option<U256>
-    ) -> Result<(I256, I256), SwapSimulationError> {
+    ) -> Result<(I256, I256), PoolError> {
         let swap_result = self._simulate_swap(token_in, amount_specified, sqrt_price_limit_x96)?;
         Ok((swap_result.amount0, swap_result.amount1))
     }
@@ -393,7 +417,7 @@ impl EnhancedUniswapV3Pool {
         token_in: Address,
         amount_specified: I256,
         sqrt_price_limit_x96: Option<U256>
-    ) -> Result<(I256, I256), SwapSimulationError> {
+    ) -> Result<(I256, I256), PoolError> {
         let swap_result = self._simulate_swap(token_in, amount_specified, sqrt_price_limit_x96)?;
 
         self.liquidity = swap_result.liquidity;
@@ -403,7 +427,7 @@ impl EnhancedUniswapV3Pool {
         Ok((swap_result.amount0, swap_result.amount1))
     }
 
-    pub fn sync_from_swap_log(&mut self, log: Log) -> Result<(), PoolManagerError> {
+    pub fn sync_from_swap_log(&mut self, log: Log) -> Result<(), PoolError> {
         if self.sync_swap_with_sim {
             self.sync_swap_with_sim(log)
         } else {
@@ -411,7 +435,7 @@ impl EnhancedUniswapV3Pool {
         }
     }
 
-    fn sync_swap_with_sim(&mut self, log: Log) -> Result<(), PoolManagerError> {
+    fn sync_swap_with_sim(&mut self, log: Log) -> Result<(), PoolError> {
         let swap_event = IUniswapV3Pool::Swap::decode_log(&log, true)?;
 
         tracing::trace!(pool_tick = ?self.tick, pool_price = ?self.sqrt_price, pool_liquidity = ?self.liquidity, pool_address = ?self.address, "pool before");
@@ -453,7 +477,7 @@ impl EnhancedUniswapV3Pool {
                 swap_amount1 = ?swap_event.amount1,
                 "Swap simulation failed"
             );
-            return Err(PoolManagerError::SwapSimulationFailed);
+            return Err(PoolError::SwapSimulationFailed);
         } else {
             tracing::trace!(pool_tick = ?self.tick, pool_price = ?self.sqrt_price, pool_liquidity = ?self.liquidity, pool_address = ?self.address, "pool after");
         }
@@ -461,7 +485,7 @@ impl EnhancedUniswapV3Pool {
         Ok(())
     }
 
-    pub fn sync_from_log(&mut self, log: Log) -> Result<(), EventLogError> {
+    pub fn sync_from_log(&mut self, log: Log) -> Result<(), PoolError> {
         let event_signature = log.topics()[0];
 
         if event_signature == IUniswapV3Pool::Burn::SIGNATURE_HASH {
@@ -471,7 +495,7 @@ impl EnhancedUniswapV3Pool {
         } else if event_signature == IUniswapV3Pool::Swap::SIGNATURE_HASH {
             self._sync_from_swap_log(log)?;
         } else {
-            Err(EventLogError::InvalidEventSignature)?
+            Err(PoolError::InvalidEventSignature)?
         }
 
         Ok(())
@@ -512,6 +536,25 @@ impl EnhancedUniswapV3Pool {
 
         Ok(())
     }
+
+    pub fn swap_calldata(
+        &self,
+        recipient: Address,
+        zero_for_one: bool,
+        amount_specified: I256,
+        sqrt_price_limit_x_96: U256,
+        calldata: Vec<u8>
+    ) -> Result<Bytes, alloy::dyn_abi::Error> {
+        Ok(IUniswapV3Pool::swapCall {
+            recipient,
+            zeroForOne: zero_for_one,
+            amountSpecified: amount_specified,
+            sqrtPriceLimitX96: sqrt_price_limit_x_96,
+            data: calldata.into()
+        }
+        .abi_encode()
+        .into())
+    }
 }
 
 impl std::ops::Deref for EnhancedUniswapV3Pool {
@@ -540,6 +583,40 @@ pub enum SwapSimulationError {
     InvalidSqrtPriceLimit,
     #[error("Amount specified must be non-zero")]
     ZeroAmountSpecified
+}
+
+#[derive(Error, Debug)]
+pub enum PoolError {
+    #[error("Could not get next tick")]
+    InvalidTick,
+    #[error(transparent)]
+    PoolError(#[from] SwapSimulationError),
+    #[error(transparent)]
+    UniswapV3MathError(#[from] UniswapV3MathError),
+    #[error("Liquidity underflow")]
+    LiquidityUnderflow,
+    #[error("Invalid sqrt price limit")]
+    InvalidSqrtPriceLimit,
+    #[error("Amount specified must be non-zero")]
+    ZeroAmountSpecified,
+    #[error("Invalid asset")]
+    InvalidAsset,
+    #[error("U64 conversion error")]
+    U64ConversionError,
+    #[error("Pool data error")]
+    PoolDataError,
+    #[error("Swap simulation failed")]
+    SwapSimulationFailed,
+    #[error("Invalid event signature")]
+    InvalidEventSignature,
+    #[error(transparent)]
+    EthABIError(#[from] alloy::sol_types::Error),
+    #[error(transparent)]
+    ABIError(#[from] alloy::dyn_abi::Error),
+    #[error(transparent)]
+    AMMError(#[from] amms::errors::AMMError),
+    #[error(transparent)]
+    ArithmeticError(#[from] amms::errors::ArithmeticError)
 }
 
 #[cfg(test)]
