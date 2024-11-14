@@ -34,7 +34,7 @@ impl PairsWithPrice {
     pub fn into_price_update_stream(
         angstrom_address: Address,
         stream: CanonStateNotificationStream
-    ) -> impl Stream<Item = Vec<Self>> + 'static {
+    ) -> impl Stream<Item = Vec<Self>> + Send + Sync {
         stream.map(move |notification| {
             let new_cannon_chain = match notification {
                 reth_provider::CanonStateNotification::Reorg { new, .. } => new,

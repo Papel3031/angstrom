@@ -9,6 +9,7 @@ use testing_tools::testnet_controllers::{AngstromTestnet, AngstromTestnetConfig,
 async fn test_broadcast_order_propagation() {
     reth_tracing::init_test_tracing();
     let config = AngstromTestnetConfig {
+        anvil_key:               7,
         intial_node_count:       3,
         initial_rpc_port:        5000,
         testnet_block_time_secs: 12,
@@ -32,7 +33,8 @@ async fn test_broadcast_order_propagation() {
             orders.clone()
         )
     )
-    .await;
+    .await
+    .map(|r| r.unwrap());
 
     assert_eq!(
         res,
@@ -49,7 +51,8 @@ async fn test_broadcast_order_propagation() {
             orders
         )
     )
-    .await;
+    .await
+    .map(|r| r.unwrap());
 
     assert_eq!(res, Ok(true), "failed to receive and react to order within 4 seconds");
 }
@@ -59,6 +62,7 @@ async fn test_broadcast_order_propagation() {
 async fn test_singular_order_propagation() {
     reth_tracing::init_test_tracing();
     let config = AngstromTestnetConfig {
+        anvil_key:               7,
         intial_node_count:       3,
         initial_rpc_port:        5000,
         testnet_block_time_secs: 12,
@@ -91,7 +95,8 @@ async fn test_singular_order_propagation() {
             orders.clone()
         )
     )
-    .await;
+    .await
+    .map(|r| r.unwrap());
 
     assert_eq!(
         res,
@@ -108,7 +113,8 @@ async fn test_singular_order_propagation() {
             orders.clone()
         )
     )
-    .await;
+    .await
+    .map(|r| r.unwrap());
 
     assert_eq!(res, Ok(true), "failed to receive and react to order within 4 seconds");
 }

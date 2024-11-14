@@ -11,8 +11,8 @@ use alloy::{
 };
 use tracing::debug;
 
-use super::anvil::{AnvilWalletRpc, LocalAnvilRpc};
-use crate::contracts::anvil::spawn_anvil;
+use super::anvil::AnvilWalletRpc;
+use crate::contracts::anvil::{spawn_anvil, LocalAnvilRpc};
 
 pub mod angstrom;
 pub mod mockreward;

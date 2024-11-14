@@ -1,10 +1,10 @@
 //! CLI definition and entrypoint to executable
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
-use alloy::network::{EthereumWallet, Network};
+use alloy::network::EthereumWallet;
 use angstrom_metrics::{initialize_prometheus_metrics, METRICS_ENABLED};
 use angstrom_network::manager::StromConsensusEvent;
-use angstrom_types::{primitive::PoolId as AngstromPoolId, reth_db_wrapper::RethDbWrapper};
+use angstrom_types::reth_db_wrapper::RethDbWrapper;
 use order_pool::{order_storage::OrderStorage, PoolConfig, PoolManagerUpdate};
 use reth_node_builder::{FullNode, NodeHandle};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
@@ -17,11 +17,10 @@ mod network_builder;
 use alloy::{
     eips::{BlockId, BlockNumberOrTag},
     providers::{network::Ethereum, Provider, ProviderBuilder},
-    signers::{k256::ecdsa::SigningKey, local::LocalSigner},
-    transports::Transport
+    signers::{k256::ecdsa::SigningKey, local::LocalSigner}
 };
 use alloy_chains::Chain;
-use alloy_primitives::{private::serde::Deserialize, Address, BlockNumber};
+use alloy_primitives::{private::serde::Deserialize, Address};
 use angstrom_eth::{
     handle::{Eth, EthCommand},
     manager::EthDataCleanser
@@ -40,16 +39,13 @@ use angstrom_types::{
 use clap::Parser;
 use consensus::{AngstromValidator, ConsensusManager, ManagerNetworkDeps, Signer};
 use eyre::Context;
-use matching_engine::cfmm::uniswap::{
-    pool::EnhancedUniswapPool, pool_data_loader::DataLoader, pool_manager::UniswapPoolManager,
-    pool_providers::canonical_state_adapter::CanonicalStateAdapter
-};
+use matching_engine::{self, configure_uniswap_manager};
 use reth::{
     api::NodeAddOns,
     builder::{FullNodeComponents, Node},
     chainspec::EthereumChainSpecParser,
     cli::Cli,
-    providers::{BlockNumReader, CanonStateNotifications, CanonStateSubscriptions},
+    providers::{BlockNumReader, CanonStateSubscriptions},
     tasks::TaskExecutor
 };
 use reth_cli_util::get_secret_key;
@@ -323,39 +319,6 @@ pub async fn initialize_strom_components<Node: FullNodeComponents, AddOns: NodeA
         provider
     );
     let _consensus_handle = executor.spawn_critical("consensus", Box::pin(manager));
-}
-
-async fn configure_uniswap_manager<T: Transport + Clone, N: Network>(
-    provider: Arc<impl Provider<T, N>>,
-    state_notification: CanonStateNotifications,
-    uniswap_pool_registry: UniswapPoolRegistry,
-    current_block: BlockNumber
-) -> UniswapPoolManager<CanonicalStateAdapter, DataLoader<AngstromPoolId>, AngstromPoolId> {
-    let mut uniswap_pools: Vec<_> = uniswap_pool_registry
-        .pools()
-        .keys()
-        .map(|pool_id| {
-            let initial_ticks_per_side = 200;
-            EnhancedUniswapPool::new(
-                DataLoader::new_with_registry(*pool_id, uniswap_pool_registry.clone()),
-                initial_ticks_per_side
-            )
-        })
-        .collect();
-
-    for pool in uniswap_pools.iter_mut() {
-        pool.initialize(Some(current_block), provider.clone())
-            .await
-            .unwrap();
-    }
-
-    let state_change_buffer = 100;
-    UniswapPoolManager::new(
-        uniswap_pools,
-        current_block,
-        state_change_buffer,
-        Arc::new(CanonicalStateAdapter::new(state_notification))
-    )
 }
 
 #[derive(Debug, Clone, Default, clap::Args)]

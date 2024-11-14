@@ -367,10 +367,8 @@ pub mod test {
         let finalized_user_order = UserOrder::from_internal_order(&user_order, &outcome, 0);
         let finalized_tob = TopOfBlockOrder::of(&t, 0);
 
-        let order_hashes = vec![
-            finalized_user_order.order_hash(&pair, &assets, 0),
-            finalized_tob.order_hash(&pair, &assets, 0),
-        ];
+        let order_hashes =
+            vec![finalized_user_order.order_hash(), finalized_tob.order_hash(&pair, &assets, 0)];
 
         let angstrom_bundle_with_orders = AngstromBundle::new(
             assets,

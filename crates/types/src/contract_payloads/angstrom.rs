@@ -3,13 +3,13 @@ use std::{collections::HashMap, hash::Hash, sync::Arc};
 use alloy::{
     eips::BlockId,
     network::Network,
-    primitives::{aliases::U40, keccak256, Address, Bytes, B256, U256},
+    primitives::{keccak256, Address, Bytes, B256, U256},
     providers::Provider,
     sol_types::SolValue,
     transports::Transport
 };
 use dashmap::DashMap;
-use pade::PadeDecode;
+use pade::{PadeDecode, PadeEncode};
 use pade_macro::{PadeDecode, PadeEncode};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -27,11 +27,10 @@ use crate::{
     orders::{OrderFillState, OrderOutcome},
     primitive::{PoolId, UniswapPoolRegistry},
     sol_bindings::{
-        grouped_orders::{GroupedVanillaOrder, OrderWithStorageData},
-        rpc_orders::{
-            ExactFlashOrder, ExactStandingOrder, PartialFlashOrder, PartialStandingOrder,
-            TopOfBlockOrder as RpcTopOfBlockOrder
+        grouped_orders::{
+            FlashVariants, GroupedVanillaOrder, OrderWithStorageData, StandingVariants
         },
+        rpc_orders::TopOfBlockOrder as RpcTopOfBlockOrder,
         RawPoolOrder
     }
 };
@@ -131,120 +130,12 @@ pub struct UserOrder {
     pub max_extra_fee_asset0: u128,
     pub extra_fee_asset0:     u128,
     pub exact_in:             bool,
-    pub signature:            Bytes
+    pub signature:            Signature
 }
 
 impl UserOrder {
-    pub fn order_hash(&self, pair: &[Pair], asset: &[Asset], block: u64) -> B256 {
-        let pair = &pair[self.pair_index as usize];
-        match self.order_quantities {
-            OrderQuantities::Exact { quantity } => {
-                if let Some(validation) = &self.standing_validation {
-                    // exact standing
-                    ExactStandingOrder {
-                        ref_id: self.ref_id,
-                        exact_in: true,
-                        use_internal: self.use_internal,
-                        asset_in: if self.zero_for_one {
-                            asset[pair.index0 as usize].addr
-                        } else {
-                            asset[pair.index1 as usize].addr
-                        },
-                        asset_out: if !self.zero_for_one {
-                            asset[pair.index0 as usize].addr
-                        } else {
-                            asset[pair.index1 as usize].addr
-                        },
-                        recipient: self.recipient.unwrap_or_default(),
-                        nonce: validation.nonce,
-                        deadline: U40::from_limbs([validation.deadline]),
-                        amount: quantity,
-                        min_price: self.min_price,
-                        hook_data: self.hook_data.clone().unwrap_or_default(),
-                        max_extra_fee_asset0: self.max_extra_fee_asset0,
-                        ..Default::default()
-                    }
-                    .order_hash()
-                } else {
-                    // exact flash
-                    ExactFlashOrder {
-                        ref_id: self.ref_id,
-                        exact_in: true,
-                        use_internal: self.use_internal,
-                        asset_in: if self.zero_for_one {
-                            asset[pair.index0 as usize].addr
-                        } else {
-                            asset[pair.index1 as usize].addr
-                        },
-                        asset_out: if !self.zero_for_one {
-                            asset[pair.index0 as usize].addr
-                        } else {
-                            asset[pair.index1 as usize].addr
-                        },
-                        recipient: self.recipient.unwrap_or_default(),
-                        valid_for_block: block,
-                        amount: quantity,
-                        min_price: self.min_price,
-                        hook_data: self.hook_data.clone().unwrap_or_default(),
-                        max_extra_fee_asset0: self.max_extra_fee_asset0,
-                        ..Default::default()
-                    }
-                    .order_hash()
-                }
-            }
-            OrderQuantities::Partial { min_quantity_in, max_quantity_in, .. } => {
-                if let Some(validation) = &self.standing_validation {
-                    PartialStandingOrder {
-                        ref_id: self.ref_id,
-                        use_internal: self.use_internal,
-                        asset_in: if self.zero_for_one {
-                            asset[pair.index0 as usize].addr
-                        } else {
-                            asset[pair.index1 as usize].addr
-                        },
-                        asset_out: if !self.zero_for_one {
-                            asset[pair.index0 as usize].addr
-                        } else {
-                            asset[pair.index1 as usize].addr
-                        },
-                        recipient: self.recipient.unwrap_or_default(),
-                        deadline: U40::from_limbs([validation.deadline]),
-                        nonce: validation.nonce,
-                        min_amount_in: min_quantity_in,
-                        max_amount_in: max_quantity_in,
-                        min_price: self.min_price,
-                        hook_data: self.hook_data.clone().unwrap_or_default(),
-                        max_extra_fee_asset0: self.max_extra_fee_asset0,
-                        ..Default::default()
-                    }
-                    .order_hash()
-                } else {
-                    PartialFlashOrder {
-                        ref_id: self.ref_id,
-                        use_internal: self.use_internal,
-                        asset_in: if self.zero_for_one {
-                            asset[pair.index0 as usize].addr
-                        } else {
-                            asset[pair.index1 as usize].addr
-                        },
-                        asset_out: if !self.zero_for_one {
-                            asset[pair.index0 as usize].addr
-                        } else {
-                            asset[pair.index1 as usize].addr
-                        },
-                        recipient: self.recipient.unwrap_or_default(),
-                        valid_for_block: block,
-                        max_amount_in: max_quantity_in,
-                        min_amount_in: min_quantity_in,
-                        min_price: self.min_price,
-                        hook_data: self.hook_data.clone().unwrap_or_default(),
-                        max_extra_fee_asset0: self.max_extra_fee_asset0,
-                        ..Default::default()
-                    }
-                    .order_hash()
-                }
-            }
-        }
+    pub fn order_hash(&self) -> B256 {
+        keccak256(self.signature.pade_encode())
     }
 
     pub fn from_internal_order(
@@ -252,38 +143,58 @@ impl UserOrder {
         outcome: &OrderOutcome,
         pair_index: u16
     ) -> Self {
-        let order_quantities = match order.order {
-            GroupedVanillaOrder::KillOrFill(_) => {
-                OrderQuantities::Exact { quantity: order.quantity().to() }
-            }
-            GroupedVanillaOrder::Standing(_) => {
-                let max_quantity_in: u128 = order.quantity().to();
-                let filled_quantity = match outcome.outcome {
-                    OrderFillState::CompleteFill => max_quantity_in,
-                    OrderFillState::PartialFill(fill) => fill.to(),
-                    _ => 0
-                };
-                OrderQuantities::Partial { min_quantity_in: 0, max_quantity_in, filled_quantity }
+        let order_quantities = match &order.order {
+            GroupedVanillaOrder::KillOrFill(o) => match o {
+                FlashVariants::Exact(_) => {
+                    OrderQuantities::Exact { quantity: order.quantity().to() }
+                }
+                FlashVariants::Partial(_) => OrderQuantities::Partial {
+                    min_quantity_in: 0,
+                    max_quantity_in: order.quantity().to(),
+                    filled_quantity: 0
+                }
+            },
+            GroupedVanillaOrder::Standing(o) => match o {
+                StandingVariants::Exact(_) => {
+                    OrderQuantities::Exact { quantity: order.quantity().to() }
+                }
+                StandingVariants::Partial(_) => {
+                    let max_quantity_in = order.quantity().to();
+                    let filled_quantity = match outcome.outcome {
+                        OrderFillState::CompleteFill => max_quantity_in,
+                        OrderFillState::PartialFill(fill) => fill.to(),
+                        _ => 0
+                    };
+                    OrderQuantities::Partial {
+                        min_quantity_in: 0,
+                        max_quantity_in,
+                        filled_quantity
+                    }
+                }
             }
         };
-        let hook_data = match order.order {
+        let hook_bytes = match order.order {
             GroupedVanillaOrder::KillOrFill(ref o) => o.hook_data().clone(),
             GroupedVanillaOrder::Standing(ref o) => o.hook_data().clone()
         };
+        let hook_data = if hook_bytes.is_empty() { None } else { Some(hook_bytes) };
+        let sig_bytes = order.signature().to_vec();
+        let decoded_signature =
+            alloy::primitives::Signature::pade_decode(&mut sig_bytes.as_slice(), None).unwrap();
         Self {
             ref_id: 0,
             use_internal: false,
             pair_index,
             min_price: *order.price(),
             recipient: None,
-            hook_data: Some(hook_data),
+            hook_data,
             zero_for_one: !order.is_bid,
             standing_validation: None,
             order_quantities,
             max_extra_fee_asset0: 0,
             extra_fee_asset0: 0,
             exact_in: false,
-            signature: order.signature().clone()
+            signature: Signature::from(decoded_signature)
         }
     }
 }
@@ -307,11 +218,7 @@ impl AngstromBundle {
         self.top_of_block_orders
             .iter()
             .map(move |order| order.order_hash(&self.pairs, &self.assets, block_number))
-            .chain(
-                self.user_orders
-                    .iter()
-                    .map(move |order| order.order_hash(&self.pairs, &self.assets, block_number))
-            )
+            .chain(self.user_orders.iter().map(move |order| order.order_hash()))
     }
 
     pub fn build_dummy_for_tob_gas(
@@ -568,7 +475,11 @@ impl AngstromBundle {
                     quantity_in.to(),
                     quantity_out.to()
                 );
-                user_orders.push(UserOrder::from_internal_order(order, outcome, pair_idx as u16));
+                let transformed_order =
+                    UserOrder::from_internal_order(order, outcome, pair_idx as u16);
+                let order_bytes = transformed_order.pade_encode();
+                println!("User order\n{:?}\n{:X?}", transformed_order, order_bytes);
+                user_orders.push(transformed_order);
             }
         }
         Ok(Self::new(

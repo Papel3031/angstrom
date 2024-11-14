@@ -1,36 +1,25 @@
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::Arc;
 
-use alloy::{
-    eips::{BlockId, BlockNumberOrTag},
-    network::Network,
-    primitives::{aliases::U24, Signed},
-    providers::Provider,
-    pubsub::PubSubFrontend,
-    transports::Transport
-};
-use alloy_primitives::{Address, BlockNumber};
+use alloy::{providers::Provider, pubsub::PubSubFrontend};
+use alloy_primitives::Address;
+use alloy_rpc_types::{BlockId, Transaction};
 use angstrom::cli::StromHandles;
 use angstrom_eth::handle::Eth;
 use angstrom_network::{pool_manager::PoolHandle, PoolManagerBuilder, StromNetworkHandle};
 use angstrom_rpc::{api::OrderApiServer, OrderApi};
 use angstrom_types::{
-    contract_bindings::angstrom::Angstrom::PoolKey,
-    contract_payloads::angstrom::{AngstromPoolConfigStore, UniswapAngstromRegistry},
-    pair_with_price::PairsWithPrice,
-    primitive::{PoolId as AngstromPoolId, UniswapPoolRegistry},
-    sol_bindings::testnet::TestnetHub
+    contract_payloads::angstrom::AngstromPoolConfigStore, pair_with_price::PairsWithPrice,
+    primitive::UniswapPoolRegistry, sol_bindings::testnet::TestnetHub
 };
-use consensus::{AngstromValidator, ConsensusManager, ManagerNetworkDeps, Signer};
-use futures::StreamExt;
+use consensus::{AngstromValidator, ConsensusManager};
+use futures::{StreamExt, TryStreamExt};
 use jsonrpsee::server::ServerBuilder;
-use matching_engine::cfmm::uniswap::{
-    pool::EnhancedUniswapPool, pool_data_loader::DataLoader, pool_manager::UniswapPoolManager,
-    pool_providers::canonical_state_adapter::CanonicalStateAdapter
-};
+use matching_engine::configure_uniswap_manager;
 use order_pool::{order_storage::OrderStorage, PoolConfig};
-use reth_provider::{CanonStateNotifications, CanonStateSubscriptions};
+use reth_provider::CanonStateSubscriptions;
 use reth_tasks::TokioTaskExecutor;
 use secp256k1::SecretKey;
+use tokio_stream::wrappers::BroadcastStream;
 use validation::{
     order::state::{pools::AngstromPoolsTracker, token_pricing::TokenPriceGenerator},
     validator::ValidationClient
@@ -38,27 +27,22 @@ use validation::{
 
 use crate::{
     anvil_state_provider::{
-        state_provider_factory::{RpcStateProviderFactory, RpcStateProviderFactoryWrapper},
-        utils::StromContractInstance,
-        AnvilEthDataCleanser
+        utils::StromContractInstance, AnvilEthDataCleanser, AnvilStateProvider,
+        AnvilStateProviderWrapper
     },
-    contracts::deploy_contract_and_create_pool,
-    network::TestnetConsensusFuture,
     testnet_controllers::AngstromTestnetConfig,
-    types::SendingStromHandles,
+    types::{initial_state::InitialTestnetState, SendingStromHandles},
     validation::TestOrderValidator
 };
 
 pub struct AngstromTestnetNodeInternals {
     pub rpc_port:         u64,
-    pub state_provider:   RpcStateProviderFactoryWrapper,
+    pub state_provider:   AnvilStateProviderWrapper,
     pub order_storage:    Arc<OrderStorage>,
     pub pool_handle:      PoolHandle,
     pub tx_strom_handles: SendingStromHandles,
     pub testnet_hub:      StromContractInstance,
-    pub validator:        TestOrderValidator<RpcStateProviderFactory>,
-    _consensus:           TestnetConsensusFuture<PubSubFrontend>,
-    _consensus_running:   Arc<AtomicBool>
+    pub validator:        TestOrderValidator<AnvilStateProvider>
 }
 
 impl AngstromTestnetNodeInternals {
@@ -66,57 +50,23 @@ impl AngstromTestnetNodeInternals {
         testnet_node_id: u64,
         strom_handles: StromHandles,
         strom_network_handle: StromNetworkHandle,
-        secret_key: SecretKey,
+        _secret_key: SecretKey,
         config: AngstromTestnetConfig,
-        initial_validators: Vec<AngstromValidator>
-    ) -> eyre::Result<Self> {
+        _initial_validators: Vec<AngstromValidator>,
+        block_rx: BroadcastStream<(u64, Vec<Transaction>)>,
+        inital_angstrom_state: InitialTestnetState
+    ) -> eyre::Result<(Self, Option<ConsensusManager<PubSubFrontend>>)> {
         tracing::debug!("connecting to state provider");
         let state_provider =
-            RpcStateProviderFactoryWrapper::spawn_new(config, testnet_node_id).await?;
+            AnvilStateProviderWrapper::spawn_new(config.clone(), testnet_node_id).await?;
+        state_provider
+            .set_state(inital_angstrom_state.state)
+            .await?;
         tracing::info!("connected to state provider");
-
-        tracing::debug!("deploying contracts to anvil");
-        let addresses =
-            deploy_contract_and_create_pool(state_provider.provider().provider()).await?;
-        tracing::info!("deployed contracts to anvil");
-
-        let angstrom_addr = addresses.contract;
-        let pools = vec![PoolKey {
-            currency0:   addresses.token0,
-            currency1:   addresses.token1,
-            fee:         U24::from(0),
-            tickSpacing: Signed::<24, 1>::from_limbs([5]),
-            hooks:       addresses.hooks
-        }];
 
         let pool = strom_handles.get_pool_handle();
         let executor: TokioTaskExecutor = Default::default();
         let tx_strom_handles = (&strom_handles).into();
-
-        let rpc_w = state_provider.provider();
-        let state_stream = state_provider
-            .provider()
-            .provider()
-            .subscribe_blocks()
-            .await?
-            .into_stream()
-            .map(move |block| {
-                let cloned_block = block.clone();
-                let rpc = rpc_w.clone();
-                async move {
-                    let number = cloned_block.header.number;
-                    let mut res = vec![];
-                    for hash in cloned_block.transactions.hashes() {
-                        let Ok(Some(tx)) = rpc.provider().get_transaction_by_hash(hash).await
-                        else {
-                            continue
-                        };
-                        res.push(tx);
-                    }
-                    (number, res)
-                }
-            })
-            .buffer_unordered(10);
 
         let order_api = OrderApi::new(
             pool.clone(),
@@ -127,26 +77,27 @@ impl AngstromTestnetNodeInternals {
         let eth_handle = AnvilEthDataCleanser::spawn(
             testnet_node_id,
             executor.clone(),
-            angstrom_addr,
+            inital_angstrom_state.angstrom_addr,
             strom_handles.eth_tx,
             strom_handles.eth_rx,
-            state_stream,
+            block_rx.into_stream().map(|v| v.unwrap()),
             7
         )
         .await?;
 
         let block_id = state_provider
-            .provider()
-            .provider()
+            .rpc_provider()
             .get_block_number()
             .await
             .unwrap();
 
-        let uniswap_registry: UniswapPoolRegistry = pools.into();
+        let uniswap_registry: UniswapPoolRegistry = inital_angstrom_state.pool_keys.into();
 
         let uniswap_pool_manager = configure_uniswap_manager(
-            state_provider.provider().provider().into(),
-            state_provider.provider().subscribe_to_canonical_state(),
+            state_provider.rpc_provider().into(),
+            state_provider
+                .state_provider()
+                .subscribe_to_canonical_state(),
             uniswap_registry.clone(),
             block_id
         )
@@ -156,31 +107,32 @@ impl AngstromTestnetNodeInternals {
         tokio::spawn(async move { uniswap_pool_manager.watch_state_changes().await });
 
         let token_conversion = TokenPriceGenerator::new(
-            state_provider.provider().provider().into(),
+            state_provider.state_provider().provider().into(),
             block_id,
             uniswap_pools.clone()
         )
         .await
         .expect("failed to start price generator");
 
-        let token_price_update_stream = state_provider.provider().canonical_state_stream();
-        let token_price_update_stream =
-            PairsWithPrice::into_price_update_stream(Address::default(), token_price_update_stream)
-                .boxed();
+        let token_price_update_stream = state_provider.state_provider().canonical_state_stream();
+        let token_price_update_stream = Box::pin(PairsWithPrice::into_price_update_stream(
+            Address::default(),
+            token_price_update_stream
+        ));
 
         let pool_config_store = Arc::new(
             AngstromPoolConfigStore::load_from_chain(
-                angstrom_addr,
-                BlockId::Number(BlockNumberOrTag::Number(block_id)),
-                &state_provider.provider().provider()
+                inital_angstrom_state.angstrom_addr,
+                BlockId::latest(),
+                &state_provider.rpc_provider()
             )
             .await
-            .unwrap()
+            .map_err(|e| eyre::eyre!("{e}"))?
         );
 
         let validator = TestOrderValidator::new(
-            state_provider.provider(),
-            angstrom_addr,
+            state_provider.state_provider(),
+            inital_angstrom_state.angstrom_addr,
             uniswap_pools.clone(),
             token_conversion,
             token_price_update_stream,
@@ -203,7 +155,10 @@ impl AngstromTestnetNodeInternals {
             executor.clone(),
             strom_handles.orderpool_tx,
             strom_handles.orderpool_rx,
-            AngstromPoolsTracker::new(angstrom_addr, pool_config_store.clone()),
+            AngstromPoolsTracker::new(
+                inital_angstrom_state.angstrom_addr,
+                pool_config_store.clone()
+            ),
             strom_handles.pool_manager_tx
         );
 
@@ -220,80 +175,49 @@ impl AngstromTestnetNodeInternals {
             let _ = server_handle.stopped().await;
         });
 
-        let testnet_hub = TestnetHub::new(angstrom_addr, state_provider.provider().provider());
+        let testnet_hub =
+            TestnetHub::new(inital_angstrom_state.angstrom_addr, state_provider.rpc_provider());
 
-        let pool_registry = UniswapAngstromRegistry::new(uniswap_registry, pool_config_store);
+        // let consensus = if config.is_state_machine() {
+        // let block_number = state_provider
+        //     .provider()
+        //     .provider()
+        //     .get_block_number()
+        //     .await
+        //     .unwrap();
 
-        let consensus_handle = ConsensusManager::new(
-            ManagerNetworkDeps::new(
-                strom_network_handle.clone(),
-                state_provider.provider().subscribe_to_canonical_state(),
-                strom_handles.consensus_rx_op
-            ),
-            Signer::new(secret_key),
-            initial_validators,
-            order_storage.clone(),
-            state_provider
-                .provider()
-                .provider()
-                .get_block_number()
-                .await?,
-            pool_registry,
-            uniswap_pools.clone(),
-            state_provider.provider().provider()
-        );
+        // let pool_config_store = AngstromPoolConfigStore::default();
+        //let pool_registry = UniswapAngstromRegistry::new(pools.into(),
+        // pool_config_store);
 
-        let _consensus_running = Arc::new(AtomicBool::new(true));
+        // let consensus = Some(ConsensusManager::new(
+        //     ManagerNetworkDeps::new(
+        //         strom_network_handle.clone(),
+        //         state_provider.provider().subscribe_to_canonical_state(),
+        //         strom_handles.consensus_rx_op
+        //     ),
+        //     Signer::new(secret_key),
+        //     initial_validators,
+        //     order_storage.clone(),
+        //     block_number + 1,
+        //     pool_registry,
+        //     uni_pools,
+        //     state_provider.provider().provider()
+        // ));
 
-        let _consensus = TestnetConsensusFuture::new(
-            testnet_node_id,
-            consensus_handle,
-            _consensus_running.clone()
-        );
+        let consensus = None;
 
-        Ok(Self {
-            rpc_port,
-            state_provider,
-            order_storage,
-            pool_handle,
-            tx_strom_handles,
-            testnet_hub,
-            validator,
-            _consensus,
-            _consensus_running
-        })
+        Ok((
+            Self {
+                rpc_port,
+                state_provider,
+                order_storage,
+                pool_handle,
+                tx_strom_handles,
+                testnet_hub,
+                validator
+            },
+            consensus
+        ))
     }
-}
-
-async fn configure_uniswap_manager<T: Transport + Clone, N: Network>(
-    provider: Arc<impl Provider<T, N>>,
-    state_notification: CanonStateNotifications,
-    uniswap_pool_registry: UniswapPoolRegistry,
-    current_block: BlockNumber
-) -> UniswapPoolManager<CanonicalStateAdapter, DataLoader<AngstromPoolId>, AngstromPoolId> {
-    let mut uniswap_pools: Vec<_> = uniswap_pool_registry
-        .pools()
-        .keys()
-        .map(|pool_id| {
-            let initial_ticks_per_side = 200;
-            EnhancedUniswapPool::new(
-                DataLoader::new_with_registry(*pool_id, uniswap_pool_registry.clone()),
-                initial_ticks_per_side
-            )
-        })
-        .collect();
-
-    for pool in uniswap_pools.iter_mut() {
-        pool.initialize(Some(current_block), provider.clone())
-            .await
-            .unwrap();
-    }
-
-    let state_change_buffer = 100;
-    UniswapPoolManager::new(
-        uniswap_pools,
-        current_block,
-        state_change_buffer,
-        Arc::new(CanonicalStateAdapter::new(state_notification))
-    )
 }

@@ -15,11 +15,14 @@ use tracing::debug;
 
 use super::{
     uniswap::{TestUniswapEnv, UniswapEnv},
-    SpawnedAnvil, TestAnvilEnvironment
+    TestAnvilEnvironment
 };
-use crate::contracts::{
-    deploy::{mockreward::deploy_mock_rewards_manager, tokens::mint_token_pair},
-    DebugTransaction
+use crate::{
+    anvil_state_provider::AnvilWallet,
+    contracts::{
+        deploy::{mockreward::deploy_mock_rewards_manager, tokens::mint_token_pair},
+        DebugTransaction
+    }
 };
 
 pub trait TestMockRewardEnv: TestAnvilEnvironment {
@@ -130,9 +133,9 @@ where
     }
 }
 
-impl MockRewardEnv<UniswapEnv<SpawnedAnvil>> {
-    pub async fn spawn_anvil() -> eyre::Result<Self> {
-        let inner = UniswapEnv::spawn_anvil().await?;
+impl MockRewardEnv<UniswapEnv<AnvilWallet>> {
+    pub async fn with_anvil(anvil: AnvilWallet) -> eyre::Result<Self> {
+        let inner = UniswapEnv::with_anvil(anvil).await?;
         Self::new(inner).await
     }
 }
@@ -192,12 +195,17 @@ where
 mod tests {
 
     use super::MockRewardEnv;
-    use crate::contracts::environment::{uniswap::UniswapEnv, SpawnedAnvil};
+    use crate::{
+        anvil_state_provider::AnvilStateProviderWrapper,
+        contracts::environment::uniswap::UniswapEnv
+    };
 
     #[tokio::test]
     async fn can_be_constructed() {
-        let anvil = SpawnedAnvil::new().await.unwrap();
-        let uniswap = UniswapEnv::new(anvil).await.unwrap();
+        let anvil = AnvilStateProviderWrapper::spawn_new_isolated()
+            .await
+            .unwrap();
+        let uniswap = UniswapEnv::new(anvil.wallet_provider()).await.unwrap();
         MockRewardEnv::new(uniswap).await.unwrap();
     }
 }

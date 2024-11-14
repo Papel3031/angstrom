@@ -9,7 +9,7 @@ pub struct Cli {
     /// each node will have an rpc submission endpoint at this port + their
     /// node's number
     /// i.e. node 3/3 will have port 4202 if this value is set to 4200
-    #[clap(short = 'p', long, default_value_t = 4200)]
+    #[clap(short = 'p', long, default_value_t = 42000)]
     pub starting_port:           u16,
     /// the speed in which anvil will mine blocks.
     #[clap(short, long, default_value = "12")]
@@ -18,6 +18,15 @@ pub struct Cli {
     /// this will change in the future but is good enough for testing currently
     #[clap(short, long, default_value = "2")]
     pub nodes_in_network:        u64,
+    /// the secret key/address to use as the controller
+    #[clap(short, long, default_value = "7")]
+    pub anvil_key:               u16,
+    /// starting block to fork
+    #[clap(short = 's', long)]
+    pub fork_block:              Option<u64>,
+    /// fork url
+    #[clap(long, requires = "fork_block")]
+    pub fork_url:                Option<String>,
     /// Set the minimum log level.
     ///
     /// -v      Errors
@@ -35,10 +44,11 @@ impl Cli {
         this.init_tracing();
 
         AngstromTestnetConfig {
+            anvil_key:               this.anvil_key as usize,
             intial_node_count:       this.nodes_in_network,
             initial_rpc_port:        this.starting_port,
             testnet_block_time_secs: this.testnet_block_time_secs,
-            testnet_kind:            TestnetKind::new_raw()
+            testnet_kind:            TestnetKind::new_state_machine(None, None)
         }
     }
 

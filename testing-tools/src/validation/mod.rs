@@ -33,7 +33,7 @@ type ValidatorOperation<DB, T> =
     dyn FnOnce(
         TestOrderValidator<DB>,
         T
-    ) -> Pin<Box<dyn Future<Output = (TestOrderValidator<DB>, T)>>>;
+    ) -> Pin<Box<dyn Future<Output = (TestOrderValidator<DB>, T)> + Send>>;
 
 pub struct TestOrderValidator<
     DB: BlockStateProviderFactory + revm::DatabaseRef + Clone + Unpin + 'static
@@ -55,7 +55,7 @@ where
         angstrom_address: Address,
         uniswap_pools: SyncedUniswapPools,
         token_conversion: TokenPriceGenerator,
-        token_updates: Pin<Box<dyn Stream<Item = Vec<PairsWithPrice>> + 'static>>,
+        token_updates: Pin<Box<dyn Stream<Item = Vec<PairsWithPrice>> + Send + Sync + 'static>>,
         pool_store: Arc<AngstromPoolConfigStore>
     ) -> Self {
         let (tx, rx) = unbounded_channel();
@@ -138,7 +138,7 @@ where
         F: FnOnce(
                 TestOrderValidator<DB>,
                 T
-            ) -> Pin<Box<dyn Future<Output = (TestOrderValidator<DB>, T)>>>
+            ) -> Pin<Box<dyn Future<Output = (TestOrderValidator<DB>, T)> + Send>>
             + 'static
     {
         self.operations.push(Box::new(op));

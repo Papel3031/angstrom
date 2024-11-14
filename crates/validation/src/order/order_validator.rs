@@ -25,8 +25,9 @@ pub struct OrderValidator<DB, Pools, Fetch> {
     sim:              SimValidation<DB>,
     state:            StateValidation<Pools, Fetch>,
     token_conversion: TokenPriceGenerator,
-    token_updates:    Pin<Box<dyn Stream<Item = Vec<PairsWithPrice>> + 'static>>,
-    thread_pool: KeySplitThreadpool<UserAddress, Pin<Box<dyn Future<Output = ()> + Send>>, Handle>,
+    token_updates:    Pin<Box<dyn Stream<Item = Vec<PairsWithPrice>> + Send + Sync + 'static>>,
+    thread_pool:
+        KeySplitThreadpool<UserAddress, Pin<Box<dyn Future<Output = ()> + Send + Sync>>, Handle>,
     block_number:     Arc<AtomicU64>
 }
 
@@ -34,8 +35,8 @@ impl<DB, Pools, Fetch> OrderValidator<DB, Pools, Fetch>
 where
     DB: Unpin + Clone + 'static + revm::DatabaseRef + reth_provider::BlockNumReader + Sync + Send,
     <DB as revm::DatabaseRef>::Error: Send + Sync,
-    Pools: PoolsTracker + Sync + 'static,
-    Fetch: StateFetchUtils + Sync + 'static
+    Pools: PoolsTracker + Send + Sync + 'static,
+    Fetch: StateFetchUtils + Send + Sync + 'static
 {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
@@ -46,11 +47,11 @@ where
         uniswap_pools: SyncedUniswapPools,
         thread_pool: KeySplitThreadpool<
             UserAddress,
-            Pin<Box<dyn Future<Output = ()> + Send>>,
+            Pin<Box<dyn Future<Output = ()> + Send + Sync>>,
             Handle
         >,
         token_conversion: TokenPriceGenerator,
-        token_updates: Pin<Box<dyn Stream<Item = Vec<PairsWithPrice>> + 'static>>
+        token_updates: Pin<Box<dyn Stream<Item = Vec<PairsWithPrice>> + Send + Sync + 'static>>
     ) -> Self {
         let state = StateValidation::new(UserAccountProcessor::new(fetch), pools, uniswap_pools);
 
@@ -104,8 +105,8 @@ impl<DB, Pools, Fetch> Future for OrderValidator<DB, Pools, Fetch>
 where
     DB: Clone + Unpin + 'static + revm::DatabaseRef + Send + Sync,
     <DB as revm::DatabaseRef>::Error: Send + Sync,
-    Pools: PoolsTracker + Sync + Unpin + 'static,
-    Fetch: StateFetchUtils + Sync + Unpin + 'static
+    Pools: PoolsTracker + Send + Sync + Unpin + 'static,
+    Fetch: StateFetchUtils + Send + Sync + Unpin + 'static
 {
     type Output = ();
 

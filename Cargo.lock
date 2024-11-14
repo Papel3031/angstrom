@@ -1995,7 +1995,7 @@ dependencies = [
  "bitflags 2.6.0",
  "cexpr",
  "clang-sys",
- "itertools 0.11.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -3209,6 +3209,64 @@ dependencies = [
 ]
 
 [[package]]
+name = "devnet"
+version = "0.1.0"
+dependencies = [
+ "alloy 0.4.2",
+ "alloy-chains",
+ "alloy-primitives 0.8.9",
+ "alloy-rpc-types 0.4.2",
+ "angstrom",
+ "angstrom-eth",
+ "angstrom-network",
+ "angstrom-rpc",
+ "angstrom-types",
+ "angstrom-utils",
+ "clap",
+ "consensus",
+ "enr 0.10.0",
+ "eyre",
+ "futures",
+ "jsonrpsee",
+ "order-pool",
+ "parking_lot 0.12.3",
+ "rand",
+ "reth",
+ "reth-beacon-consensus",
+ "reth-blockchain-tree",
+ "reth-codecs",
+ "reth-db",
+ "reth-discv4",
+ "reth-dns-discovery",
+ "reth-ecies",
+ "reth-eth-wire",
+ "reth-metrics",
+ "reth-network",
+ "reth-network-api",
+ "reth-network-peers",
+ "reth-node-builder",
+ "reth-node-ethereum",
+ "reth-primitives",
+ "reth-provider",
+ "reth-revm",
+ "reth-tasks",
+ "reth-tokio-util",
+ "reth-tracing",
+ "reth-transaction-pool",
+ "secp256k1 0.29.1",
+ "serial_test",
+ "tempfile",
+ "testing-tools",
+ "tikv-jemallocator",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "validation",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4190,7 +4248,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.4.10",
+ "socket2 0.5.7",
  "tokio",
  "tower-service",
  "tracing",
@@ -4991,7 +5049,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -6065,7 +6123,7 @@ dependencies = [
 [[package]]
 name = "pade"
 version = "0.1.0"
-source = "git+https://github.com/SorellaLabs/pade#df806f73c7ce01f0c6f9b35a993c72fac4b3af61"
+source = "git+https://github.com/SorellaLabs/pade#8807ca6f82063e06b76a38f6ed93f74d5f0a9cbb"
 dependencies = [
  "alloy 0.4.2",
  "bitvec",
@@ -6077,7 +6135,7 @@ dependencies = [
 [[package]]
 name = "pade-macro"
 version = "0.1.0"
-source = "git+https://github.com/SorellaLabs/pade#df806f73c7ce01f0c6f9b35a993c72fac4b3af61"
+source = "git+https://github.com/SorellaLabs/pade#8807ca6f82063e06b76a38f6ed93f74d5f0a9cbb"
 dependencies = [
  "itertools 0.13.0",
  "proc-macro2",
@@ -11694,7 +11752,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

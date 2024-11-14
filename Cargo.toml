@@ -2,6 +2,7 @@
 members = [
   "bin/angstrom",
   "bin/testnet",
+  "bin/devnet",
   "crates/angstrom-net",
   "crates/consensus",
   "crates/types",

@@ -126,10 +126,12 @@ mod tests {
 
     use super::{AngstromEnv, DebugTransaction};
     use crate::{
+        anvil_state_provider::AnvilStateProviderWrapper,
         contracts::environment::{
             uniswap::{TestUniswapEnv, UniswapEnv},
             LocalAnvil, SpawnedAnvil, TestAnvilEnvironment
         },
+        testnet_controllers::AngstromTestnetConfig,
         type_generator::{
             amm::AMMSnapshotBuilder,
             consensus::{pool::Pool, proposal::ProposalBuilder},
@@ -139,8 +141,10 @@ mod tests {
 
     #[tokio::test]
     async fn can_be_constructed() {
-        let anvil = SpawnedAnvil::new().await.unwrap();
-        let uniswap = UniswapEnv::new(anvil).await.unwrap();
+        let anvil = AnvilStateProviderWrapper::spawn_new(AngstromTestnetConfig::default(), 0)
+            .await
+            .unwrap();
+        let uniswap = UniswapEnv::new(anvil.wallet_provider()).await.unwrap();
         AngstromEnv::new(uniswap).await.unwrap();
     }
 
@@ -308,3 +312,10 @@ mod tests {
         // angstrom.execute(encoded)
     }
 }
+
+/*
+
+initial pool there are
+
+
+*/

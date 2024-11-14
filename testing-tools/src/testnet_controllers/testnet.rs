@@ -3,33 +3,38 @@ use std::{
     future::Future
 };
 
+use alloy::providers::Provider;
 use angstrom::cli::initialize_strom_handles;
 use angstrom_network::{
     manager::StromConsensusEvent, NetworkOrderEvent, StromMessage, StromNetworkManager
 };
 use angstrom_types::{primitive::PeerId, sol_bindings::grouped_orders::AllOrders};
 use consensus::AngstromValidator;
-use futures::StreamExt;
-use rand::{thread_rng, Rng};
+use futures::{StreamExt, TryFutureExt};
+use rand::Rng;
 use reth_chainspec::Hardforks;
 use reth_metrics::common::mpsc::{
     metered_unbounded_channel, UnboundedMeteredReceiver, UnboundedMeteredSender
 };
 use reth_network_peers::pk2id;
 use reth_provider::{BlockReader, ChainSpecProvider, HeaderProvider};
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use secp256k1::{PublicKey, SecretKey};
 use tracing::{instrument, span, Instrument, Level};
 
-use super::StateMachineTestnet;
+use super::{utils::generate_node_keys, StateMachineTestnet};
 use crate::{
+    anvil_state_provider::{utils::async_to_sync, AnvilTestnetIntializer, TestnetBlockProvider},
     network::TestnetNodeNetwork,
-    testnet_controllers::{strom::TestnetNode, AngstromTestnetConfig}
+    testnet_controllers::{strom::TestnetNode, AngstromTestnetConfig},
+    types::initial_state::InitialTestnetState
 };
-#[derive(Default)]
+
 pub struct AngstromTestnet<C> {
+    block_provider:      TestnetBlockProvider,
     peers:               HashMap<u64, TestnetNode<C>>,
     _disconnected_peers: HashSet<u64>,
     _dropped_peers:      HashSet<u64>,
+    _initializer:        AnvilTestnetIntializer,
     current_max_peer_id: u64,
     config:              AngstromTestnetConfig
 }
@@ -45,25 +50,39 @@ where
         + 'static
 {
     pub async fn spawn_testnet(c: C, config: AngstromTestnetConfig) -> eyre::Result<Self> {
+        let mut initializer = AnvilTestnetIntializer::new(config.clone()).await?;
+        initializer.deploy_pool_full().await?;
+        let initial_state = initializer.initialize_state().await?;
+
+        let block_provider = TestnetBlockProvider::new();
         let mut this = Self {
             peers: Default::default(),
             _disconnected_peers: HashSet::new(),
             _dropped_peers: HashSet::new(),
             current_max_peer_id: 0,
-            config
+            config: config.clone(),
+            block_provider,
+            _initializer: initializer
         };
 
         tracing::info!("initializing testnet with {} nodes", config.intial_node_count);
-        this.spawn_new_nodes(c, config.intial_node_count).await?;
+        this.spawn_new_nodes(c, initial_state, config.intial_node_count)
+            .await?;
+        tracing::info!("INITIALIZED testnet with {} nodes", config.intial_node_count);
 
         Ok(this)
     }
 
-    pub fn as_state_machine(self) -> StateMachineTestnet<C> {
+    pub fn as_state_machine<'a>(self) -> StateMachineTestnet<'a, C> {
         StateMachineTestnet::new(self)
     }
 
-    async fn spawn_new_nodes(&mut self, c: C, number_nodes: u64) -> eyre::Result<()> {
+    async fn spawn_new_nodes(
+        &mut self,
+        c: C,
+        inital_angstrom_state: InitialTestnetState,
+        number_nodes: u64
+    ) -> eyre::Result<()> {
         let keys = generate_node_keys(number_nodes);
         let initial_validators = keys
             .iter()
@@ -72,38 +91,57 @@ where
 
         for (pk, sk) in keys {
             let node_id = self.incr_peer_id();
-            self.initialize_new_node(c.clone(), node_id, pk, sk, initial_validators.clone())
-                .await?;
+            self.initialize_new_node(
+                c.clone(),
+                node_id,
+                pk,
+                sk,
+                initial_validators.clone(),
+                inital_angstrom_state.clone()
+            )
+            .await?;
         }
 
         Ok(())
     }
 
-    #[instrument(name = "node", skip(self, node_id, c), fields(id = node_id))]
+    #[instrument(name = "node", skip(self, node_id, c, pk, sk, initial_validators, inital_angstrom_state), fields(id = node_id))]
     async fn initialize_new_node(
         &mut self,
         c: C,
         node_id: u64,
         pk: PublicKey,
         sk: SecretKey,
-        initial_validators: Vec<AngstromValidator>
+        initial_validators: Vec<AngstromValidator>,
+        inital_angstrom_state: InitialTestnetState
     ) -> eyre::Result<PeerId> {
         tracing::info!("spawning node");
         let strom_handles = initialize_strom_handles();
-        let network = TestnetNodeNetwork::new_fully_configed(
-            node_id,
-            c,
-            pk,
-            sk,
-            Some(strom_handles.pool_tx.clone()),
-            Some(strom_handles.consensus_tx_op.clone())
-        )
-        .await;
+        let (strom_network, eth_peer, strom_network_manager) =
+            TestnetNodeNetwork::new_fully_configed(
+                c,
+                pk,
+                sk,
+                Some(strom_handles.pool_tx.clone()),
+                Some(strom_handles.consensus_tx_op.clone())
+            )
+            .await;
 
-        let mut node =
-            TestnetNode::new(node_id, network, strom_handles, self.config, initial_validators)
-                .await?;
+        let mut node = TestnetNode::new(
+            node_id,
+            strom_network,
+            strom_network_manager,
+            eth_peer,
+            strom_handles,
+            self.config.clone(),
+            initial_validators,
+            self.block_provider.subscribe_to_new_blocks(),
+            inital_angstrom_state
+        )
+        .await?;
         node.connect_to_all_peers(&mut self.peers).await;
+
+        tracing::debug!("connected to all peers");
 
         let peer_id = node.peer_id();
 
@@ -166,9 +204,10 @@ where
     }
 
     /// updates the anvil state of all the peers from a given peer
-    pub async fn all_peers_update_state(&self, id: u64) -> eyre::Result<()> {
+    pub(crate) async fn all_peers_update_state(&self, id: u64) -> eyre::Result<()> {
         let peer = self.get_peer(id);
-        let (updated_state, _) = peer.state_provider().execute_and_return_state().await?;
+        let (updated_state, block) = peer.state_provider().execute_and_return_state().await?;
+        self.block_provider.broadcast_block(block);
 
         futures::future::join_all(self.peers.iter().map(|(i, peer)| async {
             if id != *i {
@@ -186,7 +225,7 @@ where
     }
 
     /// updates the anvil state of all the peers from a given peer
-    pub async fn single_peer_update_state(
+    pub(crate) async fn single_peer_update_state(
         &self,
         state_from_id: u64,
         state_to_id: u64
@@ -207,7 +246,7 @@ where
         id: Option<u64>,
         sent_msg: StromMessage,
         expected_orders: Vec<AllOrders>
-    ) -> bool {
+    ) -> eyre::Result<bool> {
         let out = self
             .run_network_event_on_all_peers_with_exception(
                 id.unwrap_or_else(|| self.random_valid_id()),
@@ -236,7 +275,7 @@ where
             )
             .await;
 
-        out == self.peers.len() - 1
+        Ok(out == self.peers.len() - 1)
     }
 
     /// takes a random peer and gets them to broadcast the message. we then
@@ -246,7 +285,7 @@ where
         id: Option<u64>,
         sent_msg: StromMessage,
         expected_message: StromConsensusEvent
-    ) -> bool {
+    ) -> eyre::Result<bool> {
         let out = self
             .run_network_event_on_all_peers_with_exception(
                 id.unwrap_or_else(|| self.random_valid_id()),
@@ -272,14 +311,14 @@ where
             )
             .await;
 
-        out == self.peers.len() - 1
+        Ok(out == self.peers.len() - 1)
     }
 
     /// if id is None, then a random id is used
-    pub async fn run_event<'a, F, O>(&'a self, id: Option<u64>, f: F) -> O::Output
+    async fn run_event<'a, F, O>(&'a self, id: Option<u64>, f: F) -> O::Output
     where
         F: FnOnce(&'a TestnetNode<C>) -> O,
-        O: Future
+        O: Future + Send + Sync
     {
         let id = if let Some(i) = id {
             assert!(!self.peers.is_empty());
@@ -301,7 +340,7 @@ where
 
     /// runs an event that uses the consensus or orderpool channels in the
     /// angstrom network and compares a expected result against all peers
-    pub async fn run_network_event_on_all_peers_with_exception<F, P, O, R, E>(
+    async fn run_network_event_on_all_peers_with_exception<F, P, O, R, E>(
         &mut self,
         exception_id: u64,
         network_f: F,
@@ -314,8 +353,8 @@ where
     where
         F: FnOnce(&TestnetNode<C>) -> O,
         P: FnOnce(Vec<UnboundedMeteredReceiver<E>>, O::Output) -> R,
-        O: Future,
-        R: Future
+        O: Future + Send + Sync,
+        R: Future + Send + Sync
     {
         let (old_peer_channels, rx_channels): (Vec<_>, Vec<_>) = self
             .peers
@@ -336,7 +375,7 @@ where
             .iter()
             .filter(|(id, _)| **id != exception_id)
             .for_each(|(_, peer)| {
-                peer.start_network(true);
+                peer.start_network();
             });
 
         let out = expected_f(rx_channels, event_out).await;
@@ -349,19 +388,23 @@ where
 
         out
     }
-}
 
-fn generate_node_keys(number_nodes: u64) -> Vec<(PublicKey, SecretKey)> {
-    let mut rng = thread_rng();
+    /// checks the current block number on all peers matches the expected
+    pub(crate) fn check_block_numbers(&self, expected_block_num: u64) -> eyre::Result<bool> {
+        let f = self.peers.values().map(|peer| {
+            let id = peer.testnet_node_id();
+            peer.state_provider()
+                .rpc_provider()
+                .get_block_number()
+                .and_then(move |r| async move { Ok((id, r)) })
+        });
 
-    (0..number_nodes)
-        .map(|_| {
-            let sk = SecretKey::new(&mut rng);
-            let secp = Secp256k1::default();
-            let pub_key = sk.public_key(&secp);
-            (pub_key, sk)
-        })
-        .collect()
+        let blocks = async_to_sync(futures::future::join_all(f))
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(blocks.into_iter().all(|(_, b)| b == expected_block_num))
+    }
 }
 
 /*

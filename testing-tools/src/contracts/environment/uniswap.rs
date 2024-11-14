@@ -5,8 +5,8 @@ use angstrom_types::contract_bindings::{
 };
 use tracing::debug;
 
-use super::{SpawnedAnvil, TestAnvilEnvironment};
-use crate::contracts::DebugTransaction;
+use super::TestAnvilEnvironment;
+use crate::{anvil_state_provider::AnvilWallet, contracts::DebugTransaction};
 
 pub trait TestUniswapEnv: TestAnvilEnvironment {
     fn pool_manager(&self) -> Address;
@@ -53,10 +53,9 @@ where
     }
 }
 
-impl UniswapEnv<SpawnedAnvil> {
-    pub async fn spawn_anvil() -> eyre::Result<Self> {
-        let inner = SpawnedAnvil::new().await?;
-        Self::new(inner).await
+impl UniswapEnv<AnvilWallet> {
+    pub async fn with_anvil(anvil: AnvilWallet) -> eyre::Result<Self> {
+        Self::new(anvil).await
     }
 }
 

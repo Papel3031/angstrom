@@ -1,16 +1,6 @@
-mod consensus_future;
-pub(crate) use consensus_future::TestnetConsensusFuture;
 mod eth_peer;
-mod network_future;
 mod strom_peer;
-use std::{
-    collections::HashSet,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc
-    },
-    task::Poll
-};
+use std::{collections::HashSet, sync::Arc};
 
 use alloy_chains::Chain;
 use alloy_primitives::Address;
@@ -19,11 +9,10 @@ use angstrom_network::{
     StromNetworkManager, StromProtocolHandler, StromSessionManager, Swarm, VerificationSidecar
 };
 pub use eth_peer::*;
-use network_future::TestnetPeerStateFuture;
 use parking_lot::RwLock;
 use reth_chainspec::Hardforks;
 use reth_metrics::common::mpsc::{MeteredPollSender, UnboundedMeteredSender};
-use reth_network::test_utils::PeerConfig;
+use reth_network::test_utils::{Peer, PeerConfig};
 use reth_network_peers::{pk2id, PeerId};
 use reth_provider::{BlockReader, ChainSpecProvider, HeaderProvider};
 use secp256k1::{PublicKey, SecretKey};
@@ -32,35 +21,32 @@ use tokio_util::sync::PollSender;
 
 use crate::network::StromNetworkPeer;
 
-pub struct TestnetNodeNetwork<C> {
+pub struct TestnetNodeNetwork {
     // eth components
-    pub eth_handle:      EthNetworkPeer,
+    pub eth_handle:   EthNetworkPeer,
     // strom components
-    pub strom_handle:    StromNetworkPeer,
-    pub secret_key:      SecretKey,
-    pub pubkey:          PeerId,
-    running:             Arc<AtomicBool>,
-    pub(crate) networks: TestnetPeerStateFuture<C>
+    pub strom_handle: StromNetworkPeer,
+    pub secret_key:   SecretKey,
+    pub pubkey:       PeerId
 }
 
-impl<C> TestnetNodeNetwork<C>
-where
-    C: BlockReader
-        + HeaderProvider
-        + ChainSpecProvider
-        + Unpin
-        + Clone
-        + ChainSpecProvider<ChainSpec: Hardforks>
-        + 'static
-{
-    pub async fn new_fully_configed(
-        testnet_node_id: u64,
+impl TestnetNodeNetwork {
+    pub async fn new_fully_configed<C>(
         c: C,
         pub_key: PublicKey,
         sk: SecretKey,
         to_pool_manager: Option<UnboundedMeteredSender<NetworkOrderEvent>>,
         to_consensus_manager: Option<UnboundedMeteredSender<StromConsensusEvent>>
-    ) -> Self {
+    ) -> (Self, Peer<C>, StromNetworkManager<C>)
+    where
+        C: BlockReader
+            + HeaderProvider
+            + ChainSpecProvider
+            + Unpin
+            + Clone
+            + ChainSpecProvider<ChainSpec: Hardforks>
+            + 'static
+    {
         let peer = PeerConfig::with_secret_key(c.clone(), sk);
 
         let peer_id = pk2id(&pub_key);
@@ -99,61 +85,14 @@ where
         let strom_handle = StromNetworkPeer::new(&strom_network);
         let eth_handle = EthNetworkPeer::new(&eth_peer);
 
-        let running = Arc::new(AtomicBool::new(true));
-        let futs =
-            TestnetPeerStateFuture::new(testnet_node_id, eth_peer, strom_network, running.clone());
-
-        Self { strom_handle, secret_key: sk, pubkey: peer_id, networks: futs, eth_handle, running }
+        (
+            Self { strom_handle, secret_key: sk, pubkey: peer_id, eth_handle },
+            eth_peer,
+            strom_network
+        )
     }
 
     pub fn pubkey(&self) -> PeerId {
         self.pubkey
-    }
-
-    pub fn stop_network(&self) {
-        self.running.store(false, Ordering::Relaxed);
-    }
-
-    pub fn blocking_stop_network(&self) {
-        self.running.store(false, Ordering::Relaxed);
-        while self.is_network_on() {}
-    }
-
-    pub fn start_network(&self) {
-        self.running.store(true, Ordering::Relaxed);
-    }
-
-    pub fn blocking_start_network(&self) {
-        self.running.store(true, Ordering::Relaxed);
-        while self.is_network_off() {}
-    }
-
-    pub fn is_network_off(&self) -> bool {
-        !self.running.load(Ordering::Relaxed)
-    }
-
-    pub fn is_network_on(&self) -> bool {
-        !self.running.load(Ordering::Relaxed)
-    }
-
-    pub(crate) async fn initialize_connections(&mut self, connections_needed: usize) {
-        tracing::debug!(pubkey = ?self.pubkey, "attempting connections to {connections_needed} peers");
-        let mut last_peer_count = 0;
-        std::future::poll_fn(|cx| loop {
-            if self.networks.poll_fut_to_initialize(cx).is_ready() {
-                panic!("peer connection failed");
-            }
-
-            let peer_cnt = self.strom_handle.peer_count();
-            if last_peer_count != peer_cnt {
-                tracing::trace!("connected to {peer_cnt}/{connections_needed} peers");
-                last_peer_count = peer_cnt;
-            }
-
-            if connections_needed == peer_cnt {
-                return Poll::Ready(())
-            }
-        })
-        .await
     }
 }

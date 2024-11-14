@@ -19,17 +19,20 @@ pub trait ThreadPool: Unpin {
     fn spawn<F>(
         &self,
         item: F
-    ) -> Pin<Box<dyn Future<Output = F::Output> + Send + Unpin + 'static>>
+    ) -> Pin<Box<dyn Future<Output = F::Output> + Send + Sync + Unpin + 'static>>
     where
-        F: Future + Send + 'static + Unpin,
-        F::Output: Send + 'static + Unpin;
+        F: Future + Send + Sync + 'static + Unpin,
+        F::Output: Send + Sync + 'static + Unpin;
 }
 
 impl ThreadPool for tokio::runtime::Handle {
-    fn spawn<F>(&self, item: F) -> Pin<Box<dyn Future<Output = F::Output> + Send + Unpin + 'static>>
+    fn spawn<F>(
+        &self,
+        item: F
+    ) -> Pin<Box<dyn Future<Output = F::Output> + Send + Sync + Unpin + 'static>>
     where
-        F: Future + Send + 'static + Unpin,
-        F::Output: Send + 'static + Unpin
+        F: Future + Send + 'static + Sync + Unpin,
+        F::Output: Send + 'static + Sync + Unpin
     {
         Box::pin(self.spawn(item).map(|res| res.unwrap()))
     }
@@ -40,7 +43,7 @@ pub trait PipelineOperation: Unpin + Send + 'static {
     fn get_next_operation(&self) -> u8;
 }
 
-pub type PipelineFut<OP> = Pin<Box<dyn Future<Output = PipelineAction<OP>> + Send + Unpin>>;
+pub type PipelineFut<OP> = Pin<Box<dyn Future<Output = PipelineAction<OP>> + Send + Sync + Unpin>>;
 
 pub struct PipelineBuilder<OP, CX>
 where
@@ -54,7 +57,7 @@ where
 impl<OP, CX> Default for PipelineBuilder<OP, CX>
 where
     OP: PipelineOperation,
-    CX: Unpin
+    CX: Unpin + Send + Sync
 {
     fn default() -> Self {
         Self::new()
@@ -64,7 +67,7 @@ where
 impl<OP, CX> PipelineBuilder<OP, CX>
 where
     OP: PipelineOperation,
-    CX: Unpin
+    CX: Unpin + Send + Sync
 {
     pub fn new() -> Self {
         Self { operations: HashMap::new(), _p: PhantomData }
@@ -91,7 +94,7 @@ where
 pub struct PipelineWithIntermediary<T, OP, CX>
 where
     OP: PipelineOperation,
-    CX: Unpin
+    CX: Unpin + Send + Sync
 {
     threadpool: T,
     operations: OperationMap<OP, CX>,
@@ -104,8 +107,9 @@ where
 impl<T, OP, CX> PipelineWithIntermediary<T, OP, CX>
 where
     T: ThreadPool,
-    OP: PipelineOperation,
-    CX: Unpin
+    OP: PipelineOperation + Send + Sync,
+    CX: Unpin + Send + Sync,
+    <OP as PipelineOperation>::End: Send + Sync
 {
     pub fn add(&mut self, item: OP) {
         self.needing_queue.push_back(item);
